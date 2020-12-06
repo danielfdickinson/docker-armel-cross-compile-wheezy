@@ -1,0 +1,125 @@
+FROM debian:wheezy
+
+ARG uid=1000
+ARG gid=1000
+ARG user=builder
+ARG group=${user}
+ARG cores=
+
+RUN echo "deb http://archive.debian.org/debian wheezy main contrib non-free" > /etc/apt/sources.list && \
+    echo "deb-src http://archive.debian.org/debian wheezy main contrib non-free" >> /etc/apt/sources.list && \
+    echo "deb http://archive.debian.org/debian-security wheezy/updates main contrib non-free" >> /etc/apt/sources.list && \
+    echo "deb-src http://archive.debian.org/debian-security wheezy/updates main contrib non-free" >> /etc/apt/sources.list && \
+    # APT CONF
+    echo "Acquire::Check-Valid-Until \"false\";" > /etc/apt/apt.conf.d/archive && \
+    apt-get update && \
+    apt-get dist-upgrade -y
+
+RUN apt-get install -y \
+  bash-completion \
+  binutils-dev \
+  build-essential \
+  bzip2 \
+  cmake \
+  curl \
+  debhelper \
+  dpkg-dev \
+  diffutils \
+  fakeroot \
+  fakechroot \
+  gawk \
+  git \
+  libgmp-dev \
+  gnupg2 \
+  libbfb0-dev \
+  libc6-dev \
+  libcurl4-gnutls-dev \
+  libdw-dev \
+  libelf-dev \
+  libisl-dev \
+  libtool \
+  ncurses-dev \
+  libmpc-dev \
+  libmpfr-dev \
+  pkg-config \
+  python-minimal \
+  quilt \
+  texinfo \
+  u-boot-tools \
+  wget \
+  xmlto \
+  xz-utils \
+  zlib1g-dev && \
+  apt-get clean -y && apt-get autoclean -y && apt-get autoremove -y && \
+  rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+ENV PATH "/opt/arm-linux-2.6/bin:$PATH"
+
+RUN addgroup --gid ${gid} ${group} && adduser --uid ${uid} --gid ${gid} --disabled-password ${user} --gecos "" && \
+        mkdir -p /home/${user}/Build && \
+        chown ${user}:${group} /home/${user}/Build && \
+        mkdir -p /opt/build && \
+        chown -R ${user}:${group} /opt
+
+USER ${user}:${group}
+
+# Stage 1: Build binutils & initial gcc
+
+RUN cd /opt/build && \
+        curl -O https://mirror.csclub.uwaterloo.ca/gnu/binutils/binutils-2.25.tar.bz2 && \
+        curl -O https://mirror.csclub.uwaterloo.ca/gnu/gcc/gcc-4.9.4/gcc-4.9.4.tar.bz2 && \
+        tar -xjf binutils-2.25.tar.bz2 && \
+        tar -xjf gcc-4.9.4.tar.bz2
+
+RUN cd /opt/build && mkdir binutils-build && \
+        cd binutils-build && \
+        ../binutils-2.25/configure --quiet --prefix=/opt/arm-linux-2.6 --target=arm-linux-gnueabi --with-sysroot --disable-nls --disable-werror --disable-multilib && \
+        make -j${cores} && \
+        make install && \
+        mkdir ../gcc-build && \
+        cd ../gcc-build && \
+        ../gcc-4.9.4/configure --quiet --prefix=/opt/arm-linux-2.6 --target=arm-linux-gnueabi --enable-languages=c --without-headers --disable-nls --enable-serial-configure --disable-multilib && \
+        make -j${cores} all-gcc && \
+        make install-gcc && \
+        cd .. && \
+        rm -f *.bz2
+
+# Stage 2: Build glibc standard C library header files and startup files
+# Stage 3: Go Back and Forth between GCC and Glibc as Required to Build Both
+
+RUN cd /opt/build && \
+        curl -O https://mirror.csclub.uwaterloo.ca/gnu/glibc/glibc-2.19.tar.bz2 && \
+        curl -O https://mirror.csclub.uwaterloo.ca/kernel.org/linux/kernel/v2.6/linux-2.6.32.9.tar.bz2 && \
+        tar -xjf glibc-2.19.tar.bz2 && \
+        tar -xjf linux-2.6.32.9.tar.bz2
+
+RUN cd /opt/build/linux-2.6.32.9 && \
+        make ARCH=arm INSTALL_HDR_PATH=/opt/arm-linux-2.6/arm-linux-gnueabi headers_install && \
+        cd .. && \
+        mkdir -p glibc-build && \
+        cd glibc-build && \
+        ../glibc-2.19/configure --quiet --prefix=/opt/arm-linux-2.6/arm-linux-gnueabi --build=$MACHTYPE --host=arm-linux-gnueabi --target=arm-linux-gnueabi --with-headers=/opt/arm-linux-2.6/arm-linux-gnueabi/include --disable-multilib libc_cv_forced_unwind=yes && \
+        make install-bootstrap-headers=yes install-headers && \
+        make -j${cores} csu/subdir_lib && \
+        install csu/crt1.o csu/crti.o csu/crtn.o /opt/arm-linux-2.6/arm-linux-gnueabi/lib && \
+        arm-linux-gnueabi-gcc -nostdlib -nostartfiles -shared -x c /dev/null -o /opt/arm-linux-2.6/arm-linux-gnueabi/lib/libc.so && \
+        touch /opt/arm-linux-2.6/arm-linux-gnueabi/include/gnu/stubs.h
+
+RUN cd /opt/build/gcc-build && \
+        make -j${cores} all-target-libgcc && \
+        make install-target-libgcc
+
+RUN cd /opt/build/glibc-build && \
+        make -j${cores} && \
+        make install
+
+RUN cd /opt/build/gcc-build && \
+        make -j${cores} && \
+        make install && \
+        cd /opt && rm -rf build
+
+VOLUME ["/home/${user}/Build"]
+
+WORKDIR /home/${user}/Build
+
+CMD ["bash"]
